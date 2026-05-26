@@ -1,0 +1,1159 @@
+=====================================================================================
+                    LEO TRACK — ПОЛНЫЙ ПРОЕКТ БАЗЫ ДАННЫХ
+                         Расчётно-графическая работа
+                    Сгенерировано: 25.05.2026 12:11:36
+=====================================================================================
+
+
+=====================================================================================
+📁 Docker Compose Configuration — docker-compose.yaml
+=====================================================================================
+
+version: '3.9'
+services:
+  leotrack_db:
+    image: postgres:16-alpine
+    container_name: leotrack_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: leotrack
+      POSTGRES_USER: tanis
+      POSTGRES_PASSWORD: 123
+      TZ: Europe/Moscow
+    ports:
+      - "5432:5432"
+    volumes:
+      # Постоянное хранилище данных
+      - leotrack_pgdata:/var/lib/postgresql/data
+      # Автозапуск скриптов при первом старте контейнера
+      - ./sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/02_data.sql:/docker-entrypoint-initdb.d/02_data.sql:ro
+      - ./sql/03_functions.sql:/docker-entrypoint-initdb.d/03_functions.sql:ro
+      - ./sql/04_triggers.sql:/docker-entrypoint-initdb.d/04_triggers.sql:ro
+      - ./sql/05_queries.sql:/docker-entrypoint-initdb.d/05_queries.sql:ro
+      - ./sql/06_demo.sql:/docker-entrypoint-initdb.d/06_demo.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tanis -d leotrack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  leotrack_pgdata:
+    driver: local
+
+=====================================================================================
+📁 1. Схема базы данных (DDL) — 01_schema.sql
+=====================================================================================
+
+DROP TABLE IF EXISTS telemetry          CASCADE;
+DROP TABLE IF EXISTS data_sessions      CASCADE;
+DROP TABLE IF EXISTS beam_coverage      CASCADE;
+DROP TABLE IF EXISTS subscriber_terminals CASCADE;
+DROP TABLE IF EXISTS invoices           CASCADE;
+DROP TABLE IF EXISTS payments           CASCADE;
+DROP TABLE IF EXISTS plan_changes       CASCADE;
+DROP TABLE IF EXISTS subscribers        CASCADE;
+DROP TABLE IF EXISTS service_plans      CASCADE;
+DROP TABLE IF EXISTS satellite_beams    CASCADE;
+DROP TABLE IF EXISTS satellites         CASCADE;
+DROP TABLE IF EXISTS orbital_planes     CASCADE;
+
+
+CREATE TABLE orbital_planes (
+    plane_id        SERIAL          PRIMARY KEY,
+    plane_name      VARCHAR(50)     NOT NULL UNIQUE,
+    altitude_km     INTEGER         NOT NULL CHECK (altitude_km BETWEEN 200 AND 2000),
+    inclination_deg NUMERIC(6,3)    NOT NULL CHECK (inclination_deg BETWEEN 0 AND 180),
+    sat_count_design INTEGER        NOT NULL CHECK (sat_count_design > 0),
+    constellation   VARCHAR(50)     NOT NULL DEFAULT 'LeoTrack-1',
+    created_at      TIMESTAMP       NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE satellites (
+    sat_id          SERIAL          PRIMARY KEY,
+    norad_id        VARCHAR(10)     NOT NULL UNIQUE,
+    sat_name        VARCHAR(60)     NOT NULL,
+    plane_id        INTEGER         NOT NULL
+                        REFERENCES orbital_planes(plane_id) ON DELETE RESTRICT,
+    slot_number     INTEGER         NOT NULL CHECK (slot_number > 0),
+    launch_date     DATE            NOT NULL,
+    status          VARCHAR(20)     NOT NULL DEFAULT 'operational'
+                        CHECK (status IN ('operational','degraded','decommissioned','standby')),
+    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
+    UNIQUE (plane_id, slot_number)
+);
+
+
+CREATE TABLE satellite_beams (
+    beam_id         SERIAL          PRIMARY KEY,
+    sat_id          INTEGER         NOT NULL
+                        REFERENCES satellites(sat_id) ON DELETE CASCADE,
+    beam_index      INTEGER         NOT NULL CHECK (beam_index > 0),
+    center_lat      NUMERIC(8,5)    NOT NULL CHECK (center_lat  BETWEEN -90  AND  90),
+    center_lon      NUMERIC(8,5)    NOT NULL CHECK (center_lon  BETWEEN -180 AND 180),
+    bandwidth_mhz   INTEGER         NOT NULL CHECK (bandwidth_mhz > 0),
+    polarization    VARCHAR(4)      NOT NULL DEFAULT 'RHCP'
+                        CHECK (polarization IN ('RHCP','LHCP','LINEAR')),
+    UNIQUE (sat_id, beam_index)
+);
+
+
+CREATE TABLE service_plans (
+    plan_id         SERIAL          PRIMARY KEY,
+    plan_name       VARCHAR(80)     NOT NULL UNIQUE,
+    monthly_fee     NUMERIC(10,2)   NOT NULL CHECK (monthly_fee >= 0),
+    data_gb_month   INTEGER         NOT NULL CHECK (data_gb_month > 0),
+    speed_dl_mbps   INTEGER         NOT NULL CHECK (speed_dl_mbps > 0),
+    speed_ul_mbps   INTEGER         NOT NULL CHECK (speed_ul_mbps > 0),
+    sla_uptime_pct  NUMERIC(5,2)    NOT NULL DEFAULT 99.00
+                        CHECK (sla_uptime_pct BETWEEN 0 AND 100),
+    price_per_gb    NUMERIC(8,4)    NOT NULL DEFAULT 0.0 CHECK (price_per_gb >= 0),
+    is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMP       NOT NULL DEFAULT NOW()
+);
+
+
+CREATE TABLE subscribers (
+    sub_id          SERIAL          PRIMARY KEY,
+    full_name       VARCHAR(120)    NOT NULL,
+    email           VARCHAR(120)    NOT NULL UNIQUE,
+    phone           VARCHAR(20)     NOT NULL UNIQUE,
+    plan_id         INTEGER         NOT NULL
+                        REFERENCES service_plans(plan_id) ON DELETE RESTRICT,
+    balance         NUMERIC(12,2)   NOT NULL DEFAULT 0.00
+                        CHECK (balance >= -5000.00),
+    status          VARCHAR(20)     NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','blocked','suspended','cancelled')),
+    registration_date DATE          NOT NULL DEFAULT CURRENT_DATE,
+    passport_number VARCHAR(20),
+    birth_date      DATE,
+    updated_at      TIMESTAMP,
+    CONSTRAINT chk_email_format CHECK (email LIKE '%@%')
+);
+
+
+CREATE TABLE subscriber_terminals (
+    terminal_id     SERIAL          PRIMARY KEY,
+    sub_id          INTEGER         NOT NULL
+                        REFERENCES subscribers(sub_id) ON DELETE CASCADE,
+    serial_number   VARCHAR(30)     NOT NULL UNIQUE,
+    hardware_model  VARCHAR(60)     NOT NULL,
+    firmware_ver    VARCHAR(20),
+    lat             NUMERIC(8,5)    CHECK (lat  BETWEEN -90  AND  90),
+    lon             NUMERIC(8,5)    CHECK (lon  BETWEEN -180 AND 180),
+    install_date    DATE            NOT NULL DEFAULT CURRENT_DATE,
+    status          VARCHAR(20)     NOT NULL DEFAULT 'online'
+                        CHECK (status IN ('online','offline','faulty','decommissioned'))
+);
+
+
+CREATE TABLE beam_coverage (
+    coverage_id     SERIAL          PRIMARY KEY,
+    terminal_id     INTEGER         NOT NULL
+                        REFERENCES subscriber_terminals(terminal_id) ON DELETE CASCADE,
+    beam_id         INTEGER         NOT NULL
+                        REFERENCES satellite_beams(beam_id) ON DELETE CASCADE,
+    assigned_at     TIMESTAMP       NOT NULL DEFAULT NOW(),
+    released_at     TIMESTAMP,
+    snr_db          NUMERIC(6,2),
+    CONSTRAINT chk_release_after_assign CHECK (released_at IS NULL OR released_at > assigned_at)
+);
+
+
+CREATE TABLE data_sessions (
+    session_id      BIGSERIAL       PRIMARY KEY,
+    terminal_id     INTEGER         NOT NULL
+                        REFERENCES subscriber_terminals(terminal_id) ON DELETE CASCADE,
+    beam_id         INTEGER
+                        REFERENCES satellite_beams(beam_id) ON DELETE SET NULL,
+    start_time      TIMESTAMP       NOT NULL,
+    end_time        TIMESTAMP,
+    bytes_down      BIGINT          NOT NULL DEFAULT 0 CHECK (bytes_down >= 0),
+    bytes_up        BIGINT          NOT NULL DEFAULT 0 CHECK (bytes_up >= 0),
+    avg_latency_ms  INTEGER         CHECK (avg_latency_ms >= 0),
+    session_cost    NUMERIC(10,4)   NOT NULL DEFAULT 0.0000 CHECK (session_cost >= 0),
+    CONSTRAINT chk_end_after_start CHECK (end_time IS NULL OR end_time > start_time)
+);
+
+
+CREATE TABLE telemetry (
+    tlm_id          BIGSERIAL       PRIMARY KEY,
+    sat_id          INTEGER         NOT NULL
+                        REFERENCES satellites(sat_id) ON DELETE CASCADE,
+    recorded_at     TIMESTAMP       NOT NULL DEFAULT NOW(),
+    battery_pct     NUMERIC(5,2)    CHECK (battery_pct BETWEEN 0 AND 100),
+    solar_watts     NUMERIC(8,2)    CHECK (solar_watts >= 0),
+    temp_c          NUMERIC(6,2),
+    downlink_eirp   NUMERIC(7,3),
+    anomaly_flag    BOOLEAN         NOT NULL DEFAULT FALSE
+);
+
+
+CREATE TABLE invoices (
+    invoice_id      SERIAL          PRIMARY KEY,
+    sub_id          INTEGER         NOT NULL
+                        REFERENCES subscribers(sub_id) ON DELETE CASCADE,
+    billing_period  VARCHAR(7)      NOT NULL,           -- 'YYYY-MM'
+    issue_date      DATE            NOT NULL DEFAULT CURRENT_DATE,
+    due_date        DATE            NOT NULL,
+    amount_base     NUMERIC(10,2)   NOT NULL CHECK (amount_base >= 0),
+    amount_overage  NUMERIC(10,2)   NOT NULL DEFAULT 0.00 CHECK (amount_overage >= 0),
+    total_amount    NUMERIC(10,2)   NOT NULL CHECK (total_amount >= 0),
+    status          VARCHAR(20)     NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending','paid','overdue','cancelled')),
+    UNIQUE (sub_id, billing_period),
+    CONSTRAINT chk_due_after_issue CHECK (due_date >= issue_date)
+);
+
+
+CREATE TABLE payments (
+    payment_id      SERIAL          PRIMARY KEY,
+    sub_id          INTEGER         NOT NULL
+                        REFERENCES subscribers(sub_id) ON DELETE RESTRICT,
+    invoice_id      INTEGER         REFERENCES invoices(invoice_id) ON DELETE SET NULL,
+    amount          NUMERIC(10,2)   NOT NULL CHECK (amount > 0),
+    payment_date    TIMESTAMP       NOT NULL DEFAULT NOW(),
+    method          VARCHAR(30)     NOT NULL DEFAULT 'card'
+                        CHECK (method IN ('card','bank_transfer','crypto','voucher','cash')),
+    transaction_ref VARCHAR(60)     NOT NULL UNIQUE
+);
+
+
+CREATE TABLE plan_changes (
+    change_id       SERIAL          PRIMARY KEY,
+    sub_id          INTEGER         NOT NULL
+                        REFERENCES subscribers(sub_id) ON DELETE CASCADE,
+    old_plan_id     INTEGER         REFERENCES service_plans(plan_id) ON DELETE SET NULL,
+    new_plan_id     INTEGER         NOT NULL
+                        REFERENCES service_plans(plan_id) ON DELETE RESTRICT,
+    changed_at      TIMESTAMP       NOT NULL DEFAULT NOW(),
+    reason          TEXT
+);
+
+
+
+
+CREATE INDEX idx_satellites_plane      ON satellites      (plane_id);
+CREATE INDEX idx_satellites_status     ON satellites      (status);
+
+
+CREATE INDEX idx_beams_sat             ON satellite_beams (sat_id);
+
+
+CREATE INDEX idx_subs_plan             ON subscribers     (plan_id);
+CREATE INDEX idx_subs_status           ON subscribers     (status);
+CREATE INDEX idx_subs_balance          ON subscribers     (balance);
+
+
+CREATE INDEX idx_terminals_sub         ON subscriber_terminals (sub_id);
+CREATE INDEX idx_terminals_status      ON subscriber_terminals (status);
+
+
+CREATE INDEX idx_sessions_terminal     ON data_sessions (terminal_id);
+CREATE INDEX idx_sessions_start        ON data_sessions (start_time DESC);
+CREATE INDEX idx_sessions_terminal_start ON data_sessions (terminal_id, start_time DESC);
+
+
+CREATE INDEX idx_tlm_sat               ON telemetry (sat_id);
+CREATE INDEX idx_tlm_time              ON telemetry (recorded_at DESC);
+CREATE INDEX idx_tlm_sat_time          ON telemetry (sat_id, recorded_at DESC);
+CREATE INDEX idx_tlm_anomaly           ON telemetry (anomaly_flag) WHERE anomaly_flag = TRUE;
+
+
+CREATE INDEX idx_inv_sub               ON invoices (sub_id);
+CREATE INDEX idx_inv_status            ON invoices (status);
+CREATE INDEX idx_inv_period            ON invoices (billing_period);
+
+
+CREATE INDEX idx_pay_sub               ON payments (sub_id);
+CREATE INDEX idx_pay_date              ON payments (payment_date DESC);
+
+=====================================================================================
+📁 2. Наполнение тестовыми данными — 02_data.sql
+=====================================================================================
+
+INSERT INTO orbital_planes (plane_name, altitude_km, inclination_deg, sat_count_design, constellation) VALUES
+  ('Alpha-550',  550,  53.000,  22, 'LeoTrack-1'),
+  ('Beta-560',   560,  53.000,  22, 'LeoTrack-1'),
+  ('Gamma-570',  570,  70.000,  20, 'LeoTrack-1'),
+  ('Delta-580',  580,  97.600,  18, 'LeoTrack-Polar'),
+  ('Epsilon-590',590,  97.600,  18, 'LeoTrack-Polar');
+
+
+INSERT INTO satellites (norad_id, sat_name, plane_id, slot_number, launch_date, status) VALUES
+  ('58001', 'LT-A-01', 1, 1, '2023-05-15', 'operational'),
+  ('58002', 'LT-A-02', 1, 2, '2023-05-15', 'operational'),
+  ('58003', 'LT-A-03', 1, 3, '2023-05-15', 'operational'),
+  ('58004', 'LT-A-04', 1, 4, '2023-09-20', 'operational'),
+  ('58005', 'LT-B-01', 2, 1, '2023-09-20', 'operational'),
+  ('58006', 'LT-B-02', 2, 2, '2023-09-20', 'degraded'),
+  ('58007', 'LT-B-03', 2, 3, '2023-09-20', 'operational'),
+  ('58008', 'LT-G-01', 3, 1, '2024-01-10', 'operational'),
+  ('58009', 'LT-G-02', 3, 2, '2024-01-10', 'operational'),
+  ('58010', 'LT-D-01', 4, 1, '2024-03-22', 'standby');
+
+
+INSERT INTO satellite_beams (sat_id, beam_index, center_lat, center_lon, bandwidth_mhz, polarization) VALUES
+  (1, 1,  55.75,  37.62, 250, 'RHCP'),
+  (1, 2,  59.95,  30.32, 250, 'RHCP'),
+  (1, 3,  53.20,  50.16, 200, 'LHCP'),
+  (2, 1,  51.51,  -0.13, 250, 'RHCP'),
+  (2, 2,  48.85,   2.35, 250, 'RHCP'),
+  (3, 1,  40.71, -74.01, 250, 'RHCP'),
+  (3, 2,  34.05,-118.24, 250, 'LHCP'),
+  (4, 1,  35.68, 139.69, 200, 'RHCP'),
+  (5, 1, -33.87, 151.21, 200, 'RHCP'),
+  (6, 1,  28.61,  77.21, 250, 'RHCP');
+
+
+INSERT INTO service_plans (plan_name, monthly_fee, data_gb_month, speed_dl_mbps, speed_ul_mbps, sla_uptime_pct, price_per_gb) VALUES
+  ('Explorer',      29.99,  50,  50,  10, 99.00, 0.50),
+  ('Nomad',         59.99, 150, 100,  20, 99.50, 0.40),
+  ('Professional', 149.99, 500, 200,  50, 99.90, 0.30),
+  ('Enterprise',   399.99,2000, 500, 100, 99.99, 0.20),
+  ('Maritime',     299.99,1000, 300,  75, 99.80, 0.25),
+  ('Aviation',     499.99,3000, 600, 120, 99.99, 0.15),
+  ('Government',   799.99,9999, 800, 200, 99.99, 0.10);
+
+
+INSERT INTO subscribers (full_name, email, phone, plan_id, balance, status, registration_date, passport_number, birth_date) VALUES
+  -- Hidden owner / system superuser
+  ('Anisimov Timur Yurievich',   'tanisimov2006@gmail.com',   '+79991234560', 7,  9999.00, 'active',    '2023-01-01', 'SU000000', '2006-03-21'),
+  -- Regular subscribers
+  ('Elena Volkova',               'e.volkova@company.ru',      '+79161001001', 3,   450.00, 'active',    '2023-03-15', NULL, NULL),
+  ('Sergey Petrov',               'spetrov@logistic.com',      '+79162002002', 2,   120.50, 'active',    '2023-04-10', NULL, NULL),
+  ('Maria Ivanova',               'maria.i@enterprise.ru',     '+79163003003', 4,  2100.00, 'active',    '2023-05-01', NULL, NULL),
+  ('Ivan Sidorov',                'isidorov@fishery.ru',       '+79164004004', 5,    -50.00,'blocked',   '2023-06-20', NULL, NULL),
+  ('Nikolai Frolov',              'nfrolov@aviation.aero',     '+79165005005', 6,  1500.00, 'active',    '2023-07-08', NULL, NULL),
+  ('Anna Morozova',               'anna.m@startup.io',         '+79166006006', 1,    15.00, 'active',    '2023-08-14', NULL, NULL),
+  ('Dmitry Kuznetsov',            'dkuznetsov@geo.survey',     '+79167007007', 3,   800.00, 'active',    '2023-09-02', NULL, NULL),
+  ('Olga Smirnova',               'osmirnova@ngo.org',         '+79168008008', 2,     0.00, 'suspended', '2023-10-17', NULL, NULL),
+  ('Alexei Novikov',              'anovikov@research.edu',     '+79169009009', 3,   320.00, 'active',    '2024-01-05', NULL, NULL),
+  ('Yuliya Belova',               'y.belova@media.tv',         '+79160010010', 4,  1200.00, 'active',    '2024-02-11', NULL, NULL),
+  ('Mikhail Zaitsev',             'mzaitsev@mine.corp',        '+79160020020', 5,  -380.00, 'blocked',   '2024-03-19', NULL, NULL);
+
+
+INSERT INTO subscriber_terminals (sub_id, serial_number, hardware_model, firmware_ver, lat, lon, install_date, status) VALUES
+  (1,  'LT-SN-000001', 'LeoTrack Apex v2', '3.1.0', 55.7558,  37.6176, '2023-01-01', 'online'),
+  (2,  'LT-SN-000002', 'LeoTrack Pro v3',  '3.2.1', 59.9311,  30.3609, '2023-03-15', 'online'),
+  (3,  'LT-SN-000003', 'LeoTrack Nomad',   '3.0.5', 55.0415,  82.9346, '2023-04-10', 'online'),
+  (4,  'LT-SN-000004', 'LeoTrack Enterprise 4K', '4.0.0', 55.7558, 37.6200, '2023-05-01', 'online'),
+  (5,  'LT-SN-000005', 'Maritime Dome M1', '2.5.2', 68.9750,  33.0800, '2023-06-20', 'faulty'),
+  (6,  'LT-SN-000006', 'AeroLink 900',     '5.0.1', 55.9736,  37.4125, '2023-07-08', 'online'),
+  (7,  'LT-SN-000007', 'LeoTrack Explorer','3.0.0', 51.5074,  -0.1278, '2023-08-14', 'online'),
+  (8,  'LT-SN-000008', 'LeoTrack Pro v3',  '3.2.1', 43.2551,  76.9126, '2023-09-02', 'online'),
+  (9,  'LT-SN-000009', 'LeoTrack Nomad',   '3.0.5', 52.2298,  21.0118, '2023-10-17', 'offline'),
+  (10, 'LT-SN-000010', 'LeoTrack Pro v3',  '3.2.1', 56.8519,  60.6122, '2024-01-05', 'online'),
+  (11, 'LT-SN-000011', 'LeoTrack Enterprise 4K','4.0.0', 55.7500, 37.6000, '2024-02-11', 'online'),
+  (12, 'LT-SN-000012', 'Maritime Dome M1', '2.5.2', 60.0000,  30.0000, '2024-03-19', 'faulty');
+
+
+INSERT INTO beam_coverage (terminal_id, beam_id, assigned_at, snr_db) VALUES
+  (1,  1, '2026-01-01 00:00:00', 18.5),
+  (2,  2, '2026-01-01 00:00:00', 21.3),
+  (3,  3, '2026-01-01 00:00:00', 15.7),
+  (4,  1, '2026-01-01 00:00:00', 22.0),
+  (5,  3, '2024-06-20 12:00:00', 10.1),
+  (6,  1, '2026-01-01 00:00:00', 25.6),
+  (7,  4, '2026-01-01 00:00:00', 19.8),
+  (8,  5, '2026-01-01 00:00:00', 17.2),
+  (10, 3, '2026-01-01 00:00:00', 20.5),
+  (11, 1, '2026-01-01 00:00:00', 23.1);
+
+
+INSERT INTO data_sessions (terminal_id, beam_id, start_time, end_time, bytes_down, bytes_up, avg_latency_ms, session_cost) VALUES
+  (1, 1, '2026-03-01 08:00:00', '2026-03-01 09:00:00', 5368709120,  536870912, 28, 0.00),
+  (1, 1, '2026-03-15 14:00:00', '2026-03-15 16:00:00', 10737418240, 1073741824, 32, 0.00),
+  (2, 2, '2026-03-02 09:00:00', '2026-03-02 10:30:00', 3221225472,  322122547,  25, 0.00),
+  (3, 3, '2026-03-03 07:00:00', '2026-03-03 08:00:00', 2147483648,  214748365,  35, 0.00),
+  (4, 1, '2026-03-04 10:00:00', '2026-03-04 18:00:00', 53687091200, 5368709120, 22, 0.00),
+  (6, 1, '2026-03-05 00:00:00', '2026-03-05 23:59:59', 107374182400,10737418240,20, 0.00),
+  (7, 4, '2026-03-06 12:00:00', '2026-03-06 13:00:00', 1073741824,  107374182, 40, 0.00),
+  (8, 5, '2026-03-07 08:00:00', '2026-03-07 09:00:00', 4294967296,  429496730,  30, 0.00),
+  (10,3, '2026-03-08 10:00:00', '2026-03-08 11:00:00', 3221225472,  322122547,  27, 0.00),
+  (11,1, '2026-03-10 09:00:00', '2026-03-10 12:00:00', 21474836480, 2147483648, 23, 0.00),
+  -- April sessions
+  (1, 1, '2026-04-01 08:00:00', '2026-04-01 09:30:00', 6442450944,  644245094,  28, 0.00),
+  (2, 2, '2026-04-02 10:00:00', '2026-04-02 11:00:00', 2147483648,  214748365,  26, 0.00),
+  (4, 1, '2026-04-05 09:00:00', '2026-04-05 20:00:00', 64424509440, 6442450944, 21, 0.00),
+  (11,1, '2026-04-10 08:00:00', '2026-04-10 14:00:00', 32212254720, 3221225472, 22, 0.00),
+  -- May sessions
+  (1, 1, '2026-05-01 08:00:00', '2026-05-01 09:00:00', 5368709120,  536870912,  29, 0.00),
+  (6, 1, '2026-05-02 00:00:00', '2026-05-02 23:59:59', 107374182400,10737418240,20, 0.00),
+  (8, 5, '2026-05-10 08:00:00', '2026-05-10 09:00:00', 4294967296,  429496730,  31, 0.00);
+
+
+INSERT INTO telemetry (sat_id, recorded_at, battery_pct, solar_watts, temp_c, downlink_eirp, anomaly_flag) VALUES
+  (1, '2026-05-24 00:00:00', 92.5, 1850.0,  -5.3, 48.2, FALSE),
+  (1, '2026-05-24 06:00:00', 88.1, 1920.5,  -3.1, 48.5, FALSE),
+  (1, '2026-05-24 12:00:00', 95.0, 2050.0,  12.4, 48.8, FALSE),
+  (2, '2026-05-24 00:00:00', 90.2, 1800.0,  -6.1, 47.9, FALSE),
+  (2, '2026-05-24 12:00:00', 93.3, 1980.0,   8.5, 48.1, FALSE),
+  (3, '2026-05-24 06:00:00', 78.5, 1650.0,  -8.2, 46.5, TRUE),
+  (3, '2026-05-24 12:00:00', 75.1, 1520.0,  15.0, 45.8, TRUE),
+  (4, '2026-05-24 06:00:00', 94.8, 2000.0,  -4.0, 49.0, FALSE),
+  (5, '2026-05-24 06:00:00', 89.9, 1870.0,  -5.5, 47.6, FALSE),
+  (6, '2026-05-24 06:00:00', 55.2,  980.0, -15.3, 40.1, TRUE);
+
+INSERT INTO invoices (sub_id, billing_period, issue_date, due_date, amount_base, amount_overage, total_amount, status) VALUES
+  -- March 2025
+  (1,  '2026-03', '2026-03-01', '2026-03-31', 799.99,   0.00,  799.99, 'paid'),
+  (2,  '2026-03', '2026-03-01', '2026-03-31', 149.99,  20.00,  169.99, 'paid'),
+  (3,  '2026-03', '2026-03-01', '2026-03-31',  59.99,   0.00,   59.99, 'paid'),
+  (4,  '2026-03', '2026-03-01', '2026-03-31', 399.99,   0.00,  399.99, 'paid'),
+  (6,  '2026-03', '2026-03-01', '2026-03-31', 499.99,   0.00,  499.99, 'paid'),
+  (7,  '2026-03', '2026-03-01', '2026-03-31',  29.99,   5.00,   34.99, 'paid'),
+  (8,  '2026-03', '2026-03-01', '2026-03-31', 149.99,   0.00,  149.99, 'paid'),
+  (10, '2026-03', '2026-03-01', '2026-03-31', 149.99,   0.00,  149.99, 'paid'),
+  (11, '2026-03', '2026-03-01', '2026-03-31', 399.99,   0.00,  399.99, 'paid'),
+  -- April 2025
+  (1,  '2026-04', '2026-04-01', '2026-04-30', 799.99,   0.00,  799.99, 'paid'),
+  (2,  '2026-04', '2026-04-01', '2026-04-30', 149.99,  45.00,  194.99, 'paid'),
+  (4,  '2026-04', '2026-04-01', '2026-04-30', 399.99, 120.00,  519.99, 'paid'),
+  (11, '2026-04', '2026-04-01', '2026-04-30', 399.99,  80.00,  479.99, 'paid'),
+  -- May 2025 (current period – mixed statuses)
+  (1,  '2026-05', '2026-05-01', '2026-05-31', 799.99,   0.00,  799.99, 'paid'),
+  (2,  '2026-05', '2026-05-01', '2026-05-31', 149.99,   0.00,  149.99, 'pending'),
+  (3,  '2026-05', '2026-05-01', '2026-05-31',  59.99,   0.00,   59.99, 'pending'),
+  (4,  '2026-05', '2026-05-01', '2026-05-31', 399.99, 200.00,  599.99, 'pending'),
+  (5,  '2026-05', '2026-05-01', '2026-04-30',  59.99,   0.00,   59.99, 'overdue'),
+  (6,  '2026-05', '2026-05-01', '2026-05-31', 499.99,   0.00,  499.99, 'paid'),
+  (7,  '2026-05', '2026-05-01', '2026-05-31',  29.99,  12.00,   41.99, 'pending'),
+  (8,  '2026-05', '2026-05-01', '2026-05-31', 149.99,   0.00,  149.99, 'pending'),
+  (10, '2026-05', '2026-05-01', '2026-05-31', 149.99,   0.00,  149.99, 'paid'),
+  (11, '2026-05', '2026-05-01', '2026-05-31', 399.99, 150.00,  549.99, 'pending'),
+  (12, '2026-05', '2026-05-01', '2026-04-30', 299.99,   0.00,  299.99, 'overdue');
+
+
+INSERT INTO payments (sub_id, invoice_id, amount, payment_date, method, transaction_ref) VALUES
+  (1,  1,  799.99, '2026-03-05 10:00:00', 'card',          'TXN-2026-0001'),
+  (2,  2,  169.99, '2026-03-07 11:00:00', 'bank_transfer', 'TXN-2026-0002'),
+  (3,  3,   59.99, '2026-03-08 09:30:00', 'card',          'TXN-2026-0003'),
+  (4,  4,  399.99, '2026-03-10 14:00:00', 'card',          'TXN-2026-0004'),
+  (6,  5,  499.99, '2026-03-12 08:00:00', 'bank_transfer', 'TXN-2026-0005'),
+  (7,  6,   34.99, '2026-03-15 16:00:00', 'voucher',       'TXN-2026-0006'),
+  (8,  7,  149.99, '2026-03-20 10:00:00', 'card',          'TXN-2026-0007'),
+  (10, 8,  149.99, '2026-03-22 09:00:00', 'card',          'TXN-2026-0008'),
+  (11, 9,  399.99, '2026-03-25 11:00:00', 'card',          'TXN-2026-0009'),
+  -- April
+  (1,  10, 799.99, '2026-04-03 10:00:00', 'card',          'TXN-2026-0010'),
+  (2,  11, 194.99, '2026-04-05 11:00:00', 'card',          'TXN-2026-0011'),
+  (4,  12, 519.99, '2026-04-08 14:00:00', 'bank_transfer', 'TXN-2026-0012'),
+  (11, 13, 479.99, '2026-04-10 09:00:00', 'card',          'TXN-2026-0013'),
+  -- May
+  (1,  14, 799.99, '2026-05-03 10:00:00', 'crypto',        'TXN-2026-0014'),
+  (6,  19, 499.99, '2026-05-05 08:00:00', 'bank_transfer', 'TXN-2026-0015'),
+  (10, 22, 149.99, '2026-05-10 09:00:00', 'card',          'TXN-2026-0016');
+
+
+INSERT INTO plan_changes (sub_id, old_plan_id, new_plan_id, changed_at, reason) VALUES
+  (2,  1, 3, '2023-06-01 10:00:00', 'Upgraded from Explorer to Professional for higher data needs'),
+  (11, 3, 4, '2024-02-11 10:00:00', 'Initial enterprise setup'),
+  (5,  2, 5, '2023-09-01 09:00:00', 'Switched to Maritime plan for vessel deployment'),
+  (3,  1, 2, '2023-05-15 11:00:00', 'Upgraded to Nomad after trial period');
+
+=====================================================================================
+📁 3. Пользовательские функции — 03_functions.sql
+=====================================================================================
+
+CREATE OR REPLACE FUNCTION get_subscriber_balance(p_sub_id INT)
+RETURNS NUMERIC
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_balance NUMERIC;
+BEGIN
+    SELECT balance INTO v_balance
+    FROM subscribers
+    WHERE sub_id = p_sub_id;
+    RETURN v_balance;   -- returns NULL automatically if no row
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_subscriber_status_label(p_sub_id INT)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_status  VARCHAR(20);
+    v_balance NUMERIC;
+BEGIN
+    SELECT status, balance INTO v_status, v_balance
+    FROM subscribers WHERE sub_id = p_sub_id;
+
+    IF NOT FOUND THEN
+        RETURN 'Subscriber not found';
+    END IF;
+
+    RETURN CASE v_status
+        WHEN 'active'    THEN 'Active'
+        WHEN 'blocked'   THEN 'Blocked by operator'
+        WHEN 'suspended' THEN 'Suspended on request'
+        WHEN 'cancelled' THEN 'Contract cancelled'
+        ELSE 'Unknown status: ' || v_status
+    END;
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION classify_balance(p_sub_id INT)
+RETURNS TEXT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_balance NUMERIC;
+BEGIN
+    SELECT balance INTO v_balance FROM subscribers WHERE sub_id = p_sub_id;
+
+    IF NOT FOUND THEN RETURN 'Subscriber not found'; END IF;
+
+    IF    v_balance < -1000  THEN RETURN 'Critical debt';
+    ELSIF v_balance < 0      THEN RETURN 'Debt';
+    ELSIF v_balance < 100    THEN RETURN 'Low balance';
+    ELSIF v_balance < 1000   THEN RETURN 'Normal';
+    ELSE                          RETURN 'High balance';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_total_data_gb(p_sub_id INT)
+RETURNS NUMERIC
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_total_bytes BIGINT := 0;
+    rec           RECORD;
+BEGIN
+    FOR rec IN
+        SELECT ds.bytes_down + ds.bytes_up AS total
+        FROM data_sessions ds
+        JOIN subscriber_terminals t ON t.terminal_id = ds.terminal_id
+        WHERE t.sub_id = p_sub_id
+    LOOP
+        v_total_bytes := v_total_bytes + rec.total;
+    END LOOP;
+
+    RETURN ROUND(v_total_bytes / 1073741824.0, 4);  -- bytes → GB
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION count_anomalies(p_sat_id INT, p_days INT DEFAULT 7)
+RETURNS INT
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_count INT;
+BEGIN
+    SELECT COUNT(*) INTO v_count
+    FROM telemetry
+    WHERE sat_id      = p_sat_id
+      AND anomaly_flag = TRUE
+      AND recorded_at >= NOW() - (p_days || ' days')::INTERVAL;
+    RETURN v_count;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION can_subscribe_plan(p_sub_id INT, p_plan_id INT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_overdue  INT;
+    v_active   BOOLEAN;
+BEGIN
+    SELECT COUNT(*) INTO v_overdue
+    FROM invoices WHERE sub_id = p_sub_id AND status = 'overdue';
+
+    SELECT is_active INTO v_active FROM service_plans WHERE plan_id = p_plan_id;
+
+    IF NOT FOUND OR v_active = FALSE THEN RETURN FALSE; END IF;
+    RETURN v_overdue = 0;
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION get_subscriber_finance_card(p_sub_id INT)
+RETURNS TABLE (
+    full_name      TEXT,
+    email          VARCHAR,
+    phone          VARCHAR,
+    plan_name      VARCHAR,
+    monthly_fee    NUMERIC,
+    balance        NUMERIC,
+    status         VARCHAR,
+    terminals      BIGINT,
+    total_invoices BIGINT,
+    total_paid     NUMERIC
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        s.full_name::TEXT,
+        s.email,
+        s.phone,
+        sp.plan_name,
+        sp.monthly_fee,
+        s.balance,
+        s.status,
+        (SELECT COUNT(*) FROM subscriber_terminals WHERE sub_id = s.sub_id),
+        (SELECT COUNT(*) FROM invoices             WHERE sub_id = s.sub_id),
+        COALESCE((SELECT SUM(amount) FROM payments WHERE sub_id = s.sub_id), 0)
+    FROM subscribers s
+    JOIN service_plans sp ON sp.plan_id = s.plan_id
+    WHERE s.sub_id = p_sub_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_top_revenue_subscribers(p_limit INT DEFAULT 10)
+RETURNS TABLE (
+    sub_id        INT,
+    full_name     TEXT,
+    plan_name     VARCHAR,
+    total_revenue NUMERIC
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        s.sub_id,
+        s.full_name::TEXT,
+        sp.plan_name,
+        COALESCE(SUM(p.amount), 0) AS total_revenue
+    FROM subscribers   s
+    JOIN service_plans sp ON sp.plan_id = s.plan_id
+    LEFT JOIN payments p  ON p.sub_id   = s.sub_id
+    GROUP BY s.sub_id, s.full_name, sp.plan_name
+    ORDER BY total_revenue DESC
+    LIMIT p_limit;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_overdue_subscribers(p_min_debt NUMERIC DEFAULT 0)
+RETURNS TABLE (
+    sub_id        INT,
+    full_name     TEXT,
+    phone         VARCHAR,
+    overdue_count BIGINT,
+    total_debt    NUMERIC
+)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        s.sub_id,
+        s.full_name::TEXT,
+        s.phone,
+        COUNT(i.invoice_id)       AS overdue_count,
+        SUM(i.total_amount)       AS total_debt
+    FROM subscribers s
+    JOIN invoices i ON i.sub_id = s.sub_id
+    WHERE i.status = 'overdue'
+    GROUP BY s.sub_id, s.full_name, s.phone
+    HAVING SUM(i.total_amount) > p_min_debt
+    ORDER BY total_debt DESC;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION recalculate_overage_cost(p_billing_period VARCHAR)
+RETURNS INT
+LANGUAGE plpgsql AS $$
+DECLARE
+    rec          RECORD;
+    v_used_gb    NUMERIC;
+    v_overage_gb NUMERIC;
+    v_charge     NUMERIC;
+    v_updated    INT := 0;
+BEGIN
+    FOR rec IN
+        SELECT
+            s.sub_id,
+            sp.data_gb_month  AS quota_gb,
+            sp.price_per_gb   AS price_per_gb,
+            i.invoice_id
+        FROM subscribers   s
+        JOIN service_plans sp ON sp.plan_id   = s.plan_id
+        JOIN invoices      i  ON i.sub_id     = s.sub_id
+        WHERE i.billing_period = p_billing_period
+          AND i.status         != 'cancelled'
+    LOOP
+        -- Sum all session bytes for this subscriber in that month
+        SELECT COALESCE(SUM(ds.bytes_down + ds.bytes_up), 0) / 1073741824.0
+        INTO v_used_gb
+        FROM data_sessions ds
+        JOIN subscriber_terminals t ON t.terminal_id = ds.terminal_id
+        WHERE t.sub_id = rec.sub_id
+          AND DATE_TRUNC('month', ds.start_time) = TO_DATE(p_billing_period || '-01', 'YYYY-MM-DD');
+
+        v_overage_gb := GREATEST(v_used_gb - rec.quota_gb, 0);
+        v_charge     := ROUND(v_overage_gb * rec.price_per_gb, 2);
+
+        UPDATE invoices
+        SET amount_overage = v_charge,
+            total_amount   = amount_base + v_charge
+        WHERE invoice_id = rec.invoice_id;
+
+        v_updated := v_updated + 1;
+    END LOOP;
+
+    RETURN v_updated;
+END;
+$$;
+
+=====================================================================================
+📁 4. Триггеры и дополнительные таблицы — 04_triggers.sql
+=====================================================================================
+
+CREATE TABLE IF NOT EXISTS subscriber_audit (
+    audit_id      BIGSERIAL   PRIMARY KEY,
+    sub_id        INT         NOT NULL,
+    operation     VARCHAR(10) NOT NULL,   -- INSERT | UPDATE | DELETE
+    changed_at    TIMESTAMP   NOT NULL DEFAULT NOW(),
+    old_status    VARCHAR(20),
+    new_status    VARCHAR(20),
+    old_balance   NUMERIC,
+    new_balance   NUMERIC,
+    changed_by    TEXT        DEFAULT CURRENT_USER
+);
+
+CREATE TABLE IF NOT EXISTS invoice_archive (
+    archive_id    BIGSERIAL   PRIMARY KEY,
+    invoice_id    INT         NOT NULL,
+    sub_id        INT         NOT NULL,
+    billing_period VARCHAR(7) NOT NULL,
+    total_amount  NUMERIC     NOT NULL,
+    status        VARCHAR(20) NOT NULL,
+    archived_at   TIMESTAMP   NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS satellite_health_log (
+    log_id        BIGSERIAL   PRIMARY KEY,
+    sat_id        INT         NOT NULL,
+    recorded_at   TIMESTAMP   NOT NULL,
+    anomaly_flag  BOOLEAN,
+    battery_pct   NUMERIC,
+    logged_at     TIMESTAMP   NOT NULL DEFAULT NOW()
+);
+
+
+CREATE OR REPLACE FUNCTION trg_fn_protect_balance()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.balance < -5000.00 THEN
+        RAISE EXCEPTION
+            'Balance cannot drop below -5000. Attempted value: %', NEW.balance;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_balance ON subscribers;
+CREATE TRIGGER trg_protect_balance
+BEFORE UPDATE OF balance ON subscribers
+FOR EACH ROW EXECUTE FUNCTION trg_fn_protect_balance();
+
+
+CREATE OR REPLACE FUNCTION trg_fn_subscriber_audit()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO subscriber_audit
+            (sub_id, operation, new_status, new_balance)
+        VALUES (NEW.sub_id, 'INSERT', NEW.status, NEW.balance);
+        RETURN NEW;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+        INSERT INTO subscriber_audit
+            (sub_id, operation, old_status, new_status, old_balance, new_balance)
+        VALUES (NEW.sub_id, 'UPDATE',
+                OLD.status, NEW.status,
+                OLD.balance, NEW.balance);
+        RETURN NEW;
+
+    ELSIF TG_OP = 'DELETE' THEN
+        INSERT INTO subscriber_audit
+            (sub_id, operation, old_status, old_balance)
+        VALUES (OLD.sub_id, 'DELETE', OLD.status, OLD.balance);
+        RETURN OLD;
+    END IF;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_subscriber_audit ON subscribers;
+CREATE TRIGGER trg_subscriber_audit
+AFTER INSERT OR UPDATE OR DELETE ON subscribers
+FOR EACH ROW EXECUTE FUNCTION trg_fn_subscriber_audit();
+
+
+
+CREATE OR REPLACE FUNCTION trg_fn_set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_set_updated_at ON subscribers;
+CREATE TRIGGER trg_set_updated_at
+BEFORE UPDATE ON subscribers
+FOR EACH ROW EXECUTE FUNCTION trg_fn_set_updated_at();
+
+
+
+CREATE OR REPLACE FUNCTION trg_fn_invoice_status_guard()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.status = 'paid' AND NEW.status != 'paid' THEN
+        RAISE EXCEPTION
+            'Cannot change status of a paid invoice (id=%). Current: %, Attempted: %',
+            OLD.invoice_id, OLD.status, NEW.status;
+    END IF;
+    IF OLD.status = 'overdue' AND NEW.status = 'pending' THEN
+        RAISE EXCEPTION
+            'Cannot revert overdue invoice (id=%) back to pending.',
+            OLD.invoice_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_invoice_status_guard ON invoices;
+CREATE TRIGGER trg_invoice_status_guard
+BEFORE UPDATE OF status ON invoices
+FOR EACH ROW EXECUTE FUNCTION trg_fn_invoice_status_guard();
+
+
+
+CREATE OR REPLACE FUNCTION trg_fn_archive_invoice()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO invoice_archive
+        (invoice_id, sub_id, billing_period, total_amount, status)
+    VALUES
+        (OLD.invoice_id, OLD.sub_id, OLD.billing_period, OLD.total_amount, OLD.status);
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_archive_invoice ON invoices;
+CREATE TRIGGER trg_archive_invoice
+AFTER DELETE ON invoices
+FOR EACH ROW EXECUTE FUNCTION trg_fn_archive_invoice();
+
+
+
+CREATE OR REPLACE FUNCTION trg_fn_protect_active_plan()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.is_active = TRUE THEN
+        RAISE EXCEPTION
+            'Cannot delete active service plan "%" (id=%). Deactivate it first.',
+            OLD.plan_name, OLD.plan_id;
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_protect_active_plan ON service_plans;
+CREATE TRIGGER trg_protect_active_plan
+BEFORE DELETE ON service_plans
+FOR EACH ROW EXECUTE FUNCTION trg_fn_protect_active_plan();
+
+
+
+CREATE OR REPLACE FUNCTION trg_fn_log_sat_anomaly()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.anomaly_flag = TRUE THEN
+        INSERT INTO satellite_health_log
+            (sat_id, recorded_at, anomaly_flag, battery_pct)
+        VALUES
+            (NEW.sat_id, NEW.recorded_at, NEW.anomaly_flag, NEW.battery_pct);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_log_sat_anomaly ON telemetry;
+CREATE TRIGGER trg_log_sat_anomaly
+AFTER INSERT ON telemetry
+FOR EACH ROW EXECUTE FUNCTION trg_fn_log_sat_anomaly();
+
+=====================================================================================
+📁 5. Аналитические SQL-запросы — 05_queries.sql
+=====================================================================================
+
+SELECT
+    s.sub_id,
+    s.full_name,
+    s.email,
+    s.phone,
+    sp.plan_name,
+    sp.monthly_fee,
+    s.balance,
+    s.status,
+    s.registration_date
+FROM subscribers s
+JOIN service_plans sp ON sp.plan_id = s.plan_id
+ORDER BY s.sub_id;
+
+SELECT
+    s.sub_id,
+    s.full_name,
+    s.phone,
+    s.balance,
+    s.status,
+    sp.plan_name
+FROM subscribers s
+JOIN service_plans sp ON sp.plan_id = s.plan_id
+WHERE s.balance < 0
+ORDER BY s.balance ASC;
+
+SELECT
+    i.billing_period,
+    COUNT(*)                                    AS invoices_total,
+    SUM(i.total_amount)                         AS billed_total,
+    SUM(CASE WHEN i.status = 'paid'
+             THEN i.total_amount ELSE 0 END)    AS collected,
+    SUM(CASE WHEN i.status IN ('pending','overdue')
+             THEN i.total_amount ELSE 0 END)    AS outstanding
+FROM invoices i
+GROUP BY i.billing_period
+ORDER BY i.billing_period;
+
+
+
+SELECT
+    s.sub_id,
+    s.full_name,
+    sp.plan_name,
+    sp.monthly_fee,
+    s.balance,
+    s.status,
+    COUNT(DISTINCT t.terminal_id)               AS terminals,
+    COALESCE(SUM(p.amount), 0)                  AS total_paid_all_time
+FROM subscribers s
+JOIN  service_plans       sp ON sp.plan_id    = s.plan_id
+LEFT JOIN subscriber_terminals t  ON t.sub_id = s.sub_id
+LEFT JOIN payments        p  ON p.sub_id      = s.sub_id
+GROUP BY s.sub_id, s.full_name, sp.plan_name, sp.monthly_fee, s.balance, s.status
+ORDER BY total_paid_all_time DESC;
+
+
+
+SELECT
+    sp.plan_name,
+    COUNT(DISTINCT s.sub_id)        AS subscriber_count,
+    ROUND(AVG(i.total_amount), 2)   AS avg_invoice_amount,
+    SUM(i.total_amount)             AS total_revenue
+FROM service_plans sp
+JOIN subscribers  s  ON s.plan_id  = sp.plan_id
+JOIN invoices     i  ON i.sub_id   = s.sub_id
+WHERE i.status = 'paid'
+GROUP BY sp.plan_id, sp.plan_name
+HAVING AVG(i.total_amount) > 200
+ORDER BY avg_invoice_amount DESC;
+
+
+WITH session_totals AS (
+    SELECT
+        t.sub_id,
+        SUM(ds.bytes_down + ds.bytes_up) / 1073741824.0  AS used_gb
+    FROM data_sessions ds
+    JOIN subscriber_terminals t ON t.terminal_id = ds.terminal_id
+    WHERE ds.start_time >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+      AND ds.start_time <  DATE_TRUNC('month', CURRENT_DATE)
+    GROUP BY t.sub_id
+)
+SELECT
+    s.sub_id,
+    s.full_name,
+    sp.plan_name,
+    sp.data_gb_month                        AS plan_quota_gb,
+    ROUND(st.used_gb::NUMERIC, 2)           AS used_gb,
+    ROUND((st.used_gb / sp.data_gb_month * 100)::NUMERIC, 1) AS usage_pct
+FROM session_totals st
+JOIN subscribers   s  ON s.sub_id  = st.sub_id
+JOIN service_plans sp ON sp.plan_id = s.plan_id
+WHERE st.used_gb > sp.data_gb_month * 0.80   -- >80% quota used
+ORDER BY usage_pct DESC;
+
+
+
+SELECT
+    sat.sat_id,
+    sat.norad_id,
+    sat.sat_name,
+    sat.status,
+    op.plane_name,
+    COUNT(*) FILTER (WHERE tlm.anomaly_flag = TRUE) AS anomaly_count,
+    ROUND(AVG(tlm.battery_pct), 1)                  AS avg_battery_pct
+FROM satellites sat
+JOIN orbital_planes    op  ON op.plane_id = sat.plane_id
+JOIN telemetry         tlm ON tlm.sat_id  = sat.sat_id
+WHERE tlm.recorded_at >= NOW() - INTERVAL '30 days'
+GROUP BY sat.sat_id, sat.norad_id, sat.sat_name, sat.status, op.plane_name
+ORDER BY anomaly_count DESC, avg_battery_pct ASC
+LIMIT 5;
+
+
+
+SELECT
+    op.plane_name,
+    DATE_TRUNC('day', ds.start_time)::DATE          AS traffic_date,
+    COUNT(*)                                         AS session_count,
+    ROUND(SUM(ds.bytes_down + ds.bytes_up) / 1073741824.0, 3) AS total_gb,
+    ROUND(AVG(ds.avg_latency_ms), 1)                AS avg_latency_ms
+FROM data_sessions ds
+JOIN satellite_beams   sb  ON sb.beam_id  = ds.beam_id
+JOIN satellites        sat ON sat.sat_id  = sb.sat_id
+JOIN orbital_planes    op  ON op.plane_id = sat.plane_id
+WHERE ds.start_time >= '2026-03-01'
+  AND ds.start_time <  '2026-06-01'
+GROUP BY op.plane_name, DATE_TRUNC('day', ds.start_time)
+ORDER BY traffic_date, total_gb DESC;
+
+
+
+SELECT
+    s.sub_id,
+    s.full_name,
+    s.phone,
+    s.balance,
+    i.invoice_id,
+    i.billing_period,
+    i.total_amount,
+    i.status                                AS invoice_status,
+    (CURRENT_DATE - i.due_date)             AS days_overdue
+FROM subscribers s
+JOIN invoices i ON i.sub_id = s.sub_id
+WHERE i.status IN ('overdue', 'pending')
+  AND i.due_date < CURRENT_DATE
+ORDER BY days_overdue DESC, s.balance ASC;
+
+
+
+SELECT
+    sat.sat_name,
+    sat.norad_id,
+    sb.beam_index,
+    op.plane_name,
+    COUNT(bc.coverage_id)               AS terminals_served,
+    ROUND(AVG(bc.snr_db), 2)            AS avg_snr_db,
+    MIN(bc.snr_db)                      AS min_snr_db
+FROM satellite_beams   sb
+JOIN satellites        sat ON sat.sat_id  = sb.sat_id
+JOIN orbital_planes    op  ON op.plane_id = sat.plane_id
+LEFT JOIN beam_coverage bc  ON bc.beam_id = sb.beam_id
+                           AND bc.released_at IS NULL   -- active assignments only
+GROUP BY sat.sat_id, sat.sat_name, sat.norad_id, sb.beam_index, op.plane_name
+HAVING COUNT(bc.coverage_id) > 0
+ORDER BY avg_snr_db ASC
+LIMIT 10;
+
+=====================================================================================
+📁 6. Демонстрационный скрипт — 06_demo.sql
+=====================================================================================
+
+-- ─── SECTION 1: Scalar functions ────────────────────────────
+
+-- 1a. Balance of subscriber #1 (Anisimov Timur – hidden owner)
+SELECT get_subscriber_balance(1) AS balance_owner;
+
+-- 1b. Balance of a debtor
+SELECT get_subscriber_balance(5) AS balance_debtor;
+
+-- 1c. Non-existent subscriber
+SELECT get_subscriber_balance(9999) AS balance_null;
+
+-- 2. Status labels for all subscribers
+SELECT sub_id, full_name, get_subscriber_status_label(sub_id) AS status_label
+FROM subscribers ORDER BY sub_id;
+
+-- 3. Balance classification sweep
+SELECT sub_id, full_name, balance, classify_balance(sub_id) AS category
+FROM subscribers ORDER BY balance;
+
+-- 4. Total data consumed per subscriber (GB)
+SELECT s.sub_id, s.full_name, get_total_data_gb(s.sub_id) AS used_gb
+FROM subscribers s ORDER BY used_gb DESC;
+
+-- 5. Anomaly counts (last 30 days)
+SELECT sat_id, sat_name, count_anomalies(sat_id, 30) AS anomalies
+FROM satellites ORDER BY anomalies DESC;
+
+-- 6. Plan-change eligibility checks
+SELECT
+    can_subscribe_plan(1, 4) AS owner_can_enterprise,     -- should be TRUE
+    can_subscribe_plan(5, 3) AS debtor_can_professional;   -- should be FALSE (overdue)
+
+-- ─── SECTION 2: Table-returning functions ───────────────────
+
+-- 7. Full finance card for subscriber #1
+SELECT * FROM get_subscriber_finance_card(1);
+
+-- 8. Top 5 revenue subscribers
+SELECT * FROM get_top_revenue_subscribers(5);
+
+-- 9. Overdue subscribers with any debt
+SELECT * FROM get_overdue_subscribers(0);
+
+-- 10. Recalculate overage for May-2025
+SELECT recalculate_overage_cost('2026-05') AS invoices_updated;
+
+-- ─── SECTION 3: Trigger demos ───────────────────────────────
+
+-- TRIGGER 1: Balance guard – this MUST raise an exception
+DO $$
+BEGIN
+    BEGIN
+        UPDATE subscribers SET balance = -9999.00 WHERE sub_id = 7;
+    EXCEPTION WHEN others THEN
+        RAISE NOTICE 'TRIGGER 1 OK: %', SQLERRM;
+    END;
+END;
+$$;
+
+-- TRIGGER 2: Audit log – update a subscriber and check the log
+UPDATE subscribers SET balance = balance + 100 WHERE sub_id = 3;
+SELECT * FROM subscriber_audit ORDER BY audit_id DESC LIMIT 5;
+
+-- TRIGGER 3: updated_at auto-set
+UPDATE subscribers SET status = 'active' WHERE sub_id = 9;
+SELECT sub_id, full_name, updated_at FROM subscribers WHERE sub_id = 9;
+
+-- TRIGGER 4: Invoice status guard – paid → pending must fail
+DO $$
+BEGIN
+    BEGIN
+        UPDATE invoices SET status = 'pending' WHERE invoice_id = 1;
+    EXCEPTION WHEN others THEN
+        RAISE NOTICE 'TRIGGER 4 OK: %', SQLERRM;
+    END;
+END;
+$$;
+
+-- TRIGGER 5: Archive on delete – delete and check archive
+INSERT INTO invoices (sub_id, billing_period, issue_date, due_date,
+                      amount_base, total_amount, status)
+VALUES (7, '2026-06', CURRENT_DATE, CURRENT_DATE + 30, 29.99, 29.99, 'pending');
+
+DELETE FROM invoices WHERE sub_id = 7 AND billing_period = '2026-06';
+SELECT * FROM invoice_archive ORDER BY archived_at DESC LIMIT 3;
+
+-- TRIGGER 6: Protect active plan – must fail
+DO $$
+BEGIN
+    BEGIN
+        DELETE FROM service_plans WHERE plan_id = 1;
+    EXCEPTION WHEN others THEN
+        RAISE NOTICE 'TRIGGER 6 OK: %', SQLERRM;
+    END;
+END;
+$$;
+
+-- TRIGGER 7: Anomaly log – insert a telemetry record with anomaly
+INSERT INTO telemetry (sat_id, recorded_at, battery_pct, anomaly_flag)
+VALUES (3, NOW(), 45.0, TRUE);
+SELECT * FROM satellite_health_log ORDER BY logged_at DESC LIMIT 3;
+
+=====================================================================================
+                   КОНЕЦ ОБЪЕДИНЁННОГО ФАЙЛА
+=====================================================================================

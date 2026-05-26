@@ -1,0 +1,32 @@
+version: '3.9'
+services:
+  leotrack_db:
+    image: postgres:16-alpine
+    container_name: leotrack_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: leotrack
+      POSTGRES_USER: tanis
+      POSTGRES_PASSWORD: 123
+      TZ: Europe/Moscow
+    ports:
+      - "5432:5432"
+    volumes:
+      # Постоянное хранилище данных
+      - leotrack_pgdata:/var/lib/postgresql/data
+      # Автозапуск скриптов при первом старте контейнера
+      - ./sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/02_data.sql:/docker-entrypoint-initdb.d/02_data.sql:ro
+      - ./sql/03_functions.sql:/docker-entrypoint-initdb.d/03_functions.sql:ro
+      - ./sql/04_triggers.sql:/docker-entrypoint-initdb.d/04_triggers.sql:ro
+      - ./sql/05_queries.sql:/docker-entrypoint-initdb.d/05_queries.sql:ro
+      - ./sql/06_demo.sql:/docker-entrypoint-initdb.d/06_demo.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tanis -d leotrack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  leotrack_pgdata:
+    driver: local
