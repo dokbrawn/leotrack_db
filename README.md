@@ -21,7 +21,7 @@
 ## 📁 Структура проекта
 
 ```
-leotrack/
+leotrack_db/
 ├── docker-compose.yaml          # Запуск PostgreSQL в контейнере
 ├── sql/
 │   ├── 01_schema.sql            # DDL: таблицы, ограничения, индексы
