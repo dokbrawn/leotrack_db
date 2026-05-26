@@ -31,7 +31,7 @@ leotrack_db/
 │   ├── 05_queries.sql           # 10 аналитических SQL-запросов
 │   └── 06_demo.sql              # Демонстрационный сценарий
 ├── diagram/
-│   └── leotrack_er.png          # ER-диаграмма (вставить скриншот из DBeaver)
+│   └── leotrack_er.png          # ER-диаграмма
 └── README.md                    # Этот файл
 ```
 
@@ -83,9 +83,9 @@ psql -h localhost -p 5432 -U tanis -d leotrack
 | User     | `tanis`    |
 | Password | `123`      |
 
-### DBeaver / DataGrip / pgAdmin
+### DBeaver
 
-Создать новое соединение PostgreSQL с параметрами из таблицы выше.
+![ER-диаграмма LeoTrack](diagram/leotrack_er.png)
 
 ---
 
